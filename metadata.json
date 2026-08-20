@@ -1,0 +1,6 @@
+{
+  "name": "UCL Green Wall Live",
+  "description": "A responsive ecological interface for sensing and tracking the UCL Green Wall living facade, showing real-time bio-acoustic and environmental sensor streams.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

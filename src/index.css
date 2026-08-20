@@ -1,0 +1,120 @@
+@import url('https://fonts.googleapis.com/css2?family=Caveat:wght@500;600;700&family=Libre+Baskerville:ital,wght@0,400;0,700;1,400&family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+
+@import "tailwindcss";
+
+@theme {
+  --font-serif: 'Libre Baskerville', Georgia, serif;
+  --font-sans: 'Inter', "Helvetica Neue", sans-serif;
+  --font-mono: 'JetBrains Mono', "Courier New", monospace;
+
+  /* Custom palette matching the Artistic Flair theme */
+  --color-paper-bg: #F5F2ED;
+  --color-paper-sheet: #FDFCFB;
+  --color-paper-dark: #E6E1D6;
+  --color-sage-primary: #5A5A40;
+  --color-sage-dark: #3E3E2C;
+  --color-sage-light: #D1CFC9;
+  --color-sage-pale: #E6E1D6;
+  --color-wood-beige: #D0CBB7;
+  --color-ink-charcoal: #2D2D2A;
+  --color-gold-muted: #C2AF8C;
+}
+
+/* Custom scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: #F5F2ED;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #D1CFC9;
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #A3A380;
+}
+
+/* Base resets */
+body {
+  background-color: var(--color-paper-bg);
+  color: var(--color-ink-charcoal);
+  font-family: var(--font-sans);
+  overflow-x: hidden;
+}
+
+h1, h2, h3, h4, .font-serif {
+  font-family: var(--font-serif);
+}
+
+/* Custom paper border styling using the theme colors */
+.paper-border {
+  border: 1px solid rgba(90, 90, 64, 0.2);
+}
+
+.paper-border-dashed {
+  border: 1px dashed rgba(90, 90, 64, 0.3);
+}
+
+.paper-border-double {
+  border: 3px double rgba(90, 90, 64, 0.35);
+}
+
+/* Subtle page fold or curl effect */
+.paper-curl {
+  position: relative;
+}
+.paper-curl::after {
+  content: '';
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: 0;
+  height: 0;
+  border-style: solid;
+  border-width: 0 0 12px 12px;
+  border-color: transparent transparent #E6E1D6 #FDFCFB;
+  box-shadow: -1px -1px 2px rgba(0,0,0,0.05);
+  transition: all 0.3s ease;
+}
+
+/* Artistic Flair Theme utilities */
+.paper-texture {
+  background-image: radial-gradient(#d1cfc9 0.5px, transparent 0.5px);
+  background-size: 24px 24px;
+}
+
+.sidebar-active {
+  background-color: #E6E1D6;
+  border-right: 3px solid #5A5A40;
+}
+
+.annotation-pin {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #5A5A40;
+  position: absolute;
+}
+
+.annotation-line {
+  height: 1px;
+  background: rgba(90, 90, 64, 0.3);
+  position: absolute;
+  transform-origin: left;
+}
+
+.chart-container .recharts-cartesian-grid-horizontal line,
+.chart-container .recharts-cartesian-grid-vertical line {
+  stroke: rgba(90, 90, 64, 0.1);
+  stroke-dasharray: 2 2;
+}
+
+/* Soft transition effects */
+.transition-fade {
+  transition: opacity 0.4s ease-in-out, transform 0.4s ease-in-out;
+}
