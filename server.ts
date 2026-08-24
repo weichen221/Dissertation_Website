@@ -1,6 +1,7 @@
 import express from 'express';
 import path from 'path';
 import mqtt from 'mqtt';
+import { URL } from 'node:url';
 import { createServer as createViteServer } from 'vite';
 import { dbService } from './src/db/mqttStorage.js';
 import { extractSpeciesFromMessage } from './src/lib/species.js';
@@ -10,6 +11,20 @@ const __dirname = process.cwd();
 const DEFAULT_PORT = Number(process.env.PORT || 3000);
 const HOST = process.env.HOST || '0.0.0.0';
 const MAX_PORT_ATTEMPTS = 10;
+
+function parseBooleanEnv(value: string | undefined, defaultValue: boolean): boolean {
+  if (value === undefined) return defaultValue;
+  const normalized = value.trim().toLowerCase();
+  if (['1', 'true', 'yes', 'on'].includes(normalized)) return true;
+  if (['0', 'false', 'no', 'off'].includes(normalized)) return false;
+  return defaultValue;
+}
+
+function parseNumberEnv(value: string | undefined, defaultValue: number): number {
+  if (!value) return defaultValue;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : defaultValue;
+}
 
 function listenWithFallback(app: express.Express, port: number, host: string) {
   const displayHost = host === '0.0.0.0' ? '127.0.0.1' : host;
@@ -35,8 +50,21 @@ function listenWithFallback(app: express.Express, port: number, host: string) {
   });
 }
 
-// MQTT Broker details provided by UCL CETools
-const MQTT_BROKER = 'mqtt://mqtt.cetools.org:1883';
+// MQTT Broker details (configurable through env for reliable local dev behavior)
+const MQTT_ENABLED = parseBooleanEnv(process.env.MQTT_ENABLED, true);
+const MQTT_BROKER = process.env.MQTT_BROKER || 'mqtt://mqtt.cetools.org:1883';
+const MQTT_BROKER_FALLBACKS = (process.env.MQTT_BROKER_FALLBACKS || '')
+  .split(',')
+  .map(item => item.trim())
+  .filter(Boolean);
+const MQTT_BROKERS = [MQTT_BROKER, ...MQTT_BROKER_FALLBACKS];
+const MQTT_RECONNECT_PERIOD_MS = parseNumberEnv(process.env.MQTT_RECONNECT_PERIOD_MS, 3000);
+const MQTT_MAX_RECONNECT_PERIOD_MS = parseNumberEnv(process.env.MQTT_MAX_RECONNECT_PERIOD_MS, 60000);
+const MQTT_CONNECT_TIMEOUT_MS = parseNumberEnv(process.env.MQTT_CONNECT_TIMEOUT_MS, 10000);
+const MQTT_KEEPALIVE_SECONDS = parseNumberEnv(process.env.MQTT_KEEPALIVE_SECONDS, 60);
+const MQTT_MAX_RETRIES = parseNumberEnv(process.env.MQTT_MAX_RETRIES, 5);
+const MQTT_LOG_THROTTLE_MS = parseNumberEnv(process.env.MQTT_LOG_THROTTLE_MS, 15000);
+
 const MQTT_TOPICS = [
   'UCL/GordonStreet/#',
   'UCL/GordonStreet/acoupi-bird',
@@ -53,7 +81,7 @@ interface TopicRecord {
 // Global state for live telemetry and MQTT status
 const state = {
   connected: false,
-  broker: 'mqtt.cetools.org:1883',
+  broker: MQTT_ENABLED ? MQTT_BROKERS.join(', ') : 'disabled',
   subscribedTopics: MQTT_TOPICS,
   lastMessageTime: null as string | null,
   messageCount: 0,
@@ -85,51 +113,140 @@ const state = {
   }
 };
 
+let mqttRetryCount = 0;
+let mqttRetryStopped = false;
+let currentReconnectPeriodMs = MQTT_RECONNECT_PERIOD_MS;
+const lastLogAtByKey = new Map<string, number>();
+
+const logMqttErrorThrottled = (key: string, message: string) => {
+  const now = Date.now();
+  const lastLogAt = lastLogAtByKey.get(key) || 0;
+  if (now - lastLogAt >= MQTT_LOG_THROTTLE_MS) {
+    console.error(message);
+    lastLogAtByKey.set(key, now);
+  }
+};
+
+function buildMqttServerPool() {
+  return MQTT_BROKERS.map((broker) => {
+    try {
+      const parsed = new URL(broker);
+      const protocol = parsed.protocol.replace(':', '') as 'mqtt' | 'mqtts' | 'ws' | 'wss';
+      const port = parsed.port
+        ? Number(parsed.port)
+        : (protocol === 'mqtts' ? 8883 : protocol === 'wss' ? 8081 : protocol === 'ws' ? 8080 : 1883);
+      return {
+        protocol,
+        host: parsed.hostname,
+        port
+      };
+    } catch {
+      return null;
+    }
+  }).filter(Boolean) as Array<{ protocol: 'mqtt' | 'mqtts' | 'ws' | 'wss'; host: string; port: number }>;
+}
+
+function isDnsError(err: unknown): boolean {
+  if (!err || typeof err !== 'object') return false;
+  const code = 'code' in err ? String((err as { code?: unknown }).code || '') : '';
+  const message = 'message' in err ? String((err as { message?: unknown }).message || '') : '';
+  return code === 'ENOTFOUND' || /getaddrinfo\s+ENOTFOUND/i.test(message);
+}
+
 // Setup MQTT Client
-console.log(`[MQTT] Connecting to ${MQTT_BROKER}...`);
-const mqttClient = mqtt.connect(MQTT_BROKER, {
-  clientId: `gordon-street-app_${Math.random().toString(16).substring(2, 10)}`,
-  keepalive: 60,
-  reconnectPeriod: 3000,
-  connectTimeout: 10000
-});
+let mqttClient: mqtt.MqttClient | null = null;
 
-mqttClient.on('connect', () => {
-  console.log(`[MQTT] Successfully connected to ${MQTT_BROKER}`);
-  state.connected = true;
-  state.lastError = null;
+if (MQTT_ENABLED) {
+  const mqttServerPool = buildMqttServerPool();
+  console.log(`[MQTT] Connecting to ${MQTT_BROKERS.join(', ')}...`);
+  mqttClient = mqtt.connect(MQTT_BROKER, {
+    clientId: `gordon-street-app_${Math.random().toString(16).substring(2, 10)}`,
+    keepalive: MQTT_KEEPALIVE_SECONDS,
+    reconnectPeriod: MQTT_RECONNECT_PERIOD_MS,
+    connectTimeout: MQTT_CONNECT_TIMEOUT_MS,
+    servers: mqttServerPool.length > 1 ? mqttServerPool : undefined
+  });
 
-  MQTT_TOPICS.forEach(topicFilter => {
-    mqttClient.subscribe(topicFilter, (err) => {
-      if (err) {
-        console.error(`[MQTT] Subscription error for ${topicFilter}:`, err);
-      } else {
-        console.log(`[MQTT] Subscribed to ${topicFilter}`);
-      }
+  mqttClient.on('connect', () => {
+    console.log(`[MQTT] Successfully connected to broker`);
+    state.connected = true;
+    state.lastError = null;
+    mqttRetryCount = 0;
+    mqttRetryStopped = false;
+    currentReconnectPeriodMs = MQTT_RECONNECT_PERIOD_MS;
+
+    if (mqttClient) {
+      mqttClient.options.reconnectPeriod = MQTT_RECONNECT_PERIOD_MS;
+    }
+
+    MQTT_TOPICS.forEach(topicFilter => {
+      mqttClient?.subscribe(topicFilter, (err) => {
+        if (err) {
+          console.error(`[MQTT] Subscription error for ${topicFilter}:`, err);
+        } else {
+          console.log(`[MQTT] Subscribed to ${topicFilter}`);
+        }
+      });
     });
   });
-});
 
-mqttClient.on('error', (err) => {
-  console.error(`[MQTT] Connection error:`, err.message);
+  mqttClient.on('error', (err) => {
+    state.connected = false;
+    const dnsIssue = isDnsError(err);
+    state.lastError = dnsIssue
+      ? 'MQTT broker DNS lookup failed (ENOTFOUND). Check local DNS/network or configure MQTT_BROKER to a reachable host/IP.'
+      : err.message;
+    logMqttErrorThrottled(
+      dnsIssue ? 'mqtt-dns-error' : `mqtt-error-${err.message}`,
+      `[MQTT] Connection error: ${err.message}`
+    );
+  });
+
+  mqttClient.on('offline', () => {
+    state.connected = false;
+    if (!mqttRetryStopped) {
+      logMqttErrorThrottled('mqtt-offline', '[MQTT] Client offline');
+    }
+  });
+
+  mqttClient.on('reconnect', () => {
+    mqttRetryCount += 1;
+    if (MQTT_MAX_RETRIES > 0 && mqttRetryCount > MQTT_MAX_RETRIES) {
+      mqttRetryStopped = true;
+      state.connected = false;
+      state.lastError = `MQTT reconnect attempts exceeded (${MQTT_MAX_RETRIES}). Using local fallback telemetry.`;
+      logMqttErrorThrottled('mqtt-retry-limit', `[MQTT] Reconnect limit reached (${MQTT_MAX_RETRIES}). Stopping MQTT reconnect loop.`);
+      mqttClient?.end(true);
+      return;
+    }
+
+    currentReconnectPeriodMs = Math.min(
+      MQTT_MAX_RECONNECT_PERIOD_MS,
+      Math.max(MQTT_RECONNECT_PERIOD_MS, currentReconnectPeriodMs * 2)
+    );
+
+    if (mqttClient) {
+      mqttClient.options.reconnectPeriod = currentReconnectPeriodMs;
+    }
+
+    if (!mqttRetryStopped) {
+      logMqttErrorThrottled(
+        'mqtt-reconnecting',
+        `[MQTT] Reconnecting... (${mqttRetryCount}/${MQTT_MAX_RETRIES <= 0 ? 'unlimited' : MQTT_MAX_RETRIES}), next retry in ${currentReconnectPeriodMs}ms`
+      );
+    }
+  });
+} else {
   state.connected = false;
-  state.lastError = err.message;
-});
-
-mqttClient.on('offline', () => {
-  console.log(`[MQTT] Client offline`);
-  state.connected = false;
-});
-
-mqttClient.on('reconnect', () => {
-  console.log(`[MQTT] Reconnecting...`);
-});
+  state.lastError = 'MQTT disabled by configuration (MQTT_ENABLED=false).';
+  console.warn('[MQTT] Disabled by configuration. Serving fallback/local telemetry only.');
+}
 
 let lastRealMqttTime = 0;
 let lastBirdMessageTime = 0;
 let lastBatMessageTime = 0;
 
-mqttClient.on('message', (topic, payload) => {
+mqttClient?.on('message', (topic, payload) => {
   // Strictly filter for UCL/GordonStreet/# topics as specified by user
   if (!topic.toLowerCase().startsWith('ucl/gordonstreet')) {
     return;
